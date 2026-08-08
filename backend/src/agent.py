@@ -10,25 +10,31 @@ from livekit.agents import (
     JobContext,
     JobProcess,
     cli,
-    inference,
-    tokenize,
     room_io,
+    tokenize,
 )
-from livekit.plugins import murf, silero, google, deepgram, noise_cancellation, openai
+# IMPORT FIX: Added openai for your Groq setup, and MultilingualModel for the turn detector
+from livekit.plugins import murf, silero, deepgram, noise_cancellation, openai
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
+# STRICT SYSTEM PROMPT: Forces Groq LLM to properly split its brain for English and Hindi/Hinglish
 SYSTEM_PROMPT = """
 IDENTITY: You are Anisha, a voice assistant for 'Bol-Khata', operating in the Local Commerce track.
 OBJECTIVES: Explain how you help street vendors manage their credit (udhaar) ledgers hands-free.
 KNOWLEDGE: You only know about your role as a ledger assistant.
-LANGUAGE: MIRROR THE USER perfectly! If the user speaks a mix of Hindi and English (Hinglish), you MUST reply in the exact same mix of Hindi and English (Hinglish). 
+LANGUAGE_RULES: 
+1. If the user speaks pure English, you MUST reply entirely in English.
+2. If the user speaks Hindi or Hinglish, you MUST reply entirely in Hindi/Hinglish.
+3. MIRROR the user's language exactly.
 GUARDRAILS: 
 1. NEVER confirm an order, price, or delivery date.
-2. ESCALATION SCRIPT: If asked about orders or delivery, refuse by saying exactly: "Maaf kijiye, main order ya delivery date confirm nahi kar sakti. Kripya dukandaar se baat karein."
+2. ESCALATION SCRIPT:
+   - If user spoke English: "I am sorry, I cannot confirm orders or delivery dates. Please speak to the shopkeeper."
+   - If user spoke Hindi/Hinglish: "Maaf kijiye, main order ya delivery date confirm nahi kar sakti. Kripya dukandaar se baat karein."
 STYLE: Keep sentences under 15 words. Speak naturally. Never use formatting or emojis.
 """
 
@@ -38,44 +44,42 @@ class Assistant(Agent):
 
 server = AgentServer()
 
-
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
 
-
 server.setup_fnc = prewarm
-
 
 @server.rtc_session(agent_name="my-agent")
 async def my_agent(ctx: JobContext):
     # Logging setup
-    # Add any other context you want in all log entries here
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
 
-    # Set up a voice AI pipeline using Murf Falcon, Gemini, Deepgram, and the LiveKit turn detector
+    # EXACT MURF ANNOUNCEMENT SETTINGS MERGED WITH YOUR GROQ LLM
     session = AgentSession(
-        # Speech-to-text (STT) is your agent's ears
-        stt=deepgram.STT(model="nova-3"),
         
-        # FIXED GROQ LLM SETUP
+        # 1. DEEPGRAM (Ears): language="multi" added so it listens to BOTH Hindi and English flawlessly.
+        stt=deepgram.STT(model="nova-3", language="multi"),
+        
+        # 2. LLM (Brain): Your Groq configuration exactly as you wanted (No Gemini).
         llm=openai.LLM(
             model="llama-3.3-70b-versatile",
             base_url="https://api.groq.com/openai/v1",
             api_key=os.environ.get("GROQ_API_KEY")
         ),
         
-        # Text-to-speech (TTS) is your agent's voice
+        # 3. MURF (Voice): voice="Anisha" (Removed 'hi-IN-') to fix the foreign accent issue exactly as Murf announced.
         tts=murf.TTS(
-                voice="hi-IN-Anisha", 
-                style="Conversation",
-                tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
-                text_pacing=True
-            ),
+            voice="Anisha", 
+            style="Conversation",
+            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
+            text_pacing=True
+        ),
         
-        # VAD and turn detection
+        # 4. TURN DETECTION: MultilingualModel() added as per Murf's requirement for mixed languages.
         turn_detection=MultilingualModel(),
+        
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
     )
@@ -98,7 +102,6 @@ async def my_agent(ctx: JobContext):
 
     # Join the room and connect to the user
     await ctx.connect()
-
 
 if __name__ == "__main__":
     cli.run_app(server)

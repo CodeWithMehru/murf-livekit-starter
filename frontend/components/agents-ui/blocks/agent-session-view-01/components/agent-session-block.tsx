@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { AnimatePresence, type MotionProps, motion } from 'motion/react';
 import { useAgent, useSessionContext, useSessionMessages } from '@livekit/components-react';
 import { AgentChatTranscript } from '@/components/agents-ui/agent-chat-transcript';
@@ -181,6 +181,14 @@ export function AgentSessionView_01({
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const { state: agentState } = useAgent();
 
+  const stateMessage = useMemo(() => {
+    if (agentState === 'connecting' || agentState === 'offline' || agentState === 'starting' || agentState === 'disconnected') return "Dukaan se connect ho raha hai...";
+    if (agentState === 'listening') return "Aap bol rahe hain...";
+    if (agentState === 'speaking') return "Anisha bol rahi hai...";
+    if (agentState === 'thinking') return "Anisha soch rahi hai...";
+    return "Dukaan se connect ho raha hai...";
+  }, [agentState]);
+
   const controls: AgentControlBarControls = {
     leave: true,
     microphone: true,
@@ -241,22 +249,18 @@ export function AgentSessionView_01({
         {...BOTTOM_VIEW_MOTION_PROPS}
         className="absolute inset-x-3 bottom-0 z-50 md:inset-x-12"
       >
-        {/* Pre-connect message */}
-        {isPreConnectBufferEnabled && (
-          <AnimatePresence>
-            {messages.length === 0 && (
-              <MotionMessage
-                key="pre-connect-message"
-                duration={2}
-                aria-hidden={messages.length > 0}
-                {...SHIMMER_MOTION_PROPS}
-                className="pointer-events-none mx-auto block w-full max-w-2xl pb-4 text-center text-sm font-semibold"
-              >
-                {preConnectMessage}
-              </MotionMessage>
-            )}
-          </AnimatePresence>
-        )}
+        {/* Speaker indication & states */}
+        <AnimatePresence>
+          <MotionMessage
+            key="state-message"
+            duration={2}
+            aria-hidden={false}
+            {...SHIMMER_MOTION_PROPS}
+            className="pointer-events-none mx-auto block w-full max-w-2xl pb-4 text-center text-sm font-semibold"
+          >
+            {stateMessage}
+          </MotionMessage>
+        </AnimatePresence>
         <div className="bg-background relative mx-auto max-w-2xl pb-3 md:pb-12">
           <Fade bottom className="absolute inset-x-0 top-0 h-4 -translate-y-full" />
           <AgentControlBar

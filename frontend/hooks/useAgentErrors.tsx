@@ -33,9 +33,12 @@ export function useAgentErrors() {
       const reasons = agent.failureReasons;
 
       toastAlert({
-        title: 'Session ended',
+        title: 'Session ended / Error',
         description: (
           <>
+            <p className="w-full text-lg font-bold text-red-500 pb-2">
+              Mic ki permission allow karein
+            </p>
             {reasons.length > 1 && (
               <ul className="list-inside list-disc">
                 {reasons.map((reason) => (

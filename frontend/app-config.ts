@@ -43,15 +43,15 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   isPreConnectBufferEnabled: true,
 
   logo: '/murf-logo.svg',
-  accent: '#6366F1',
+  accent: '#22c55e',
   logoDark: '/murf-logo-dark.svg',
-  accentDark: '#818cf8',
-  startButtonText: 'Start talking',
+  accentDark: '#4ade80',
+  startButtonText: 'Khata Shuru Karein',
 
   // optional: audio visualization configuration
   // audioVisualizerType: 'bar',
-  // audioVisualizerColor: '#002cf2',
-  // audioVisualizerColorDark: '#1fd5f9',
+  // audioVisualizerColor: '#22c55e',
+  // audioVisualizerColorDark: '#4ade80',
   // audioVisualizerColorShift: 0.3,
   // audioVisualizerBarCount: 5,
   // audioVisualizerType: 'radial',
