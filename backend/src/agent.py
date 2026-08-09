@@ -1,5 +1,6 @@
 import logging
 import os
+import sqlite3  # INBUILT PYTHON DATABASE
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -9,82 +10,146 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
+    RunContext,  # IMPORTANT FOR DAY 4 TOOLS
     cli,
+    function_tool,  # IMPORTANT FOR DAY 4 TOOLS
     room_io,
     tokenize,
 )
-# IMPORT FIX: Added openai for your Groq setup, and MultilingualModel for the turn detector
-from livekit.plugins import murf, silero, deepgram, noise_cancellation, openai
+from livekit.plugins import deepgram, murf, noise_cancellation, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-# STRICT SYSTEM PROMPT: Forces Groq LLM to properly split its brain for English and Hindi/Hinglish
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bol_khata.db")
+
+# DAY 4 STRICT SYSTEM PROMPT (Memory, Consent & Devanagari Rules)
 SYSTEM_PROMPT = """
-IDENTITY: You are Anisha, a voice assistant for 'Bol-Khata', operating in the Local Commerce track.
-OBJECTIVES: Explain how you help street vendors manage their credit (udhaar) ledgers hands-free.
-KNOWLEDGE: You only know about your role as a ledger assistant.
-LANGUAGE_RULES: 
-1. If the user speaks pure English, you MUST reply entirely in English.
-2. If the user speaks Hindi or Hinglish, you MUST reply entirely in Hindi/Hinglish.
-3. MIRROR the user's language exactly.
-GUARDRAILS: 
-1. NEVER confirm an order, price, or delivery date.
-2. ESCALATION SCRIPT:
-   - If user spoke English: "I am sorry, I cannot confirm orders or delivery dates. Please speak to the shopkeeper."
-   - If user spoke Hindi/Hinglish: "Maaf kijiye, main order ya delivery date confirm nahi kar sakti. Kripya dukandaar se baat karein."
-STYLE: Keep sentences under 15 words. Speak naturally. Never use formatting or emojis.
+IDENTITY: You are Anisha, a voice assistant for 'Bol-Khata' (Local Commerce track).
+OBJECTIVES: Help vendors manage their orders and customers. You must follow the exact sequence below.
+
+SEQUENCE (STRICT):
+Step 1: When a user says Hi or greets you, ask for their name.
+Step 2: Use the 'lookup_customer' tool to check their past record.
+Step 3 (Returning Caller): If data is found, greet them by name and mention their past facts (e.g. past orders, usual quantities, preferred delivery slot).
+Step 4 (New Caller): If not found, ask them for their past orders, usual quantities, and preferred delivery slot.
+Step 5 (MANDATORY CONSENT): After gathering the facts, you MUST explicitly ask: "Can I save this information for next time?".
+Step 6: ONLY if the user explicitly agrees, call the 'save_customer' tool. If they refuse, drop it and do not save.
+
+STRICT LANGUAGE & SCRIPT RULES:
+1. STRICT 1-to-1 language matching:
+   - If the user speaks English, reply ONLY in pure English. No Hindi or Hinglish.
+   - If the user speaks Hindi, reply ONLY in pure Hindi using Devanagari script (e.g., नमस्ते). No English, Hinglish, or romanized Hindi.
+   - Do NOT mix languages in a single response. Do NOT translate your response or add translations.
+2. Keep responses short and conversational.
+
+STRICT TOOL CALLING RULES:
+1. Call tools silently. Do NOT announce that you are calling a tool, using a database, or invoking a function.
+2. NEVER mention function or tool names like 'lookup_customer', 'save_customer', 'database', 'tool', or 'function' to the user.
+3. Simply execute the tool behind the scenes, and then respond naturally once you receive the tool's result.
+
+CRITICAL RULE FOR SAVING DATA:
+If the user says 'Yes' to saving their information, you MUST IMMEDIATELY trigger the `save_customer` tool. 
+DO NOT simply say 'I have saved it' verbally without triggering the tool. 
+You are strictly forbidden from confirming that the data is saved UNTIL you have actually executed the `save_customer` function and received a success response from it.
 """
+
 
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=SYSTEM_PROMPT)
+        self._init_db()
+
+    # STEP 1: CREATE SQLITE DATABASE
+    def _init_db(self):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS customers
+                     (name TEXT PRIMARY KEY, past_orders TEXT, usual_quantities TEXT, preferred_delivery_slot TEXT)""")
+        conn.commit()
+        conn.close()
+
+    # STEP 2 & 3: LOOKUP TOOL (Agent calls this to find old callers)
+    @function_tool
+    async def lookup_customer(self, context: RunContext, name: str):
+        """Use this tool FIRST to search for an existing customer in the database by their name."""
+        logger.info(f"Looking up customer: {name}")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute(
+            "SELECT past_orders, usual_quantities, preferred_delivery_slot FROM customers WHERE name=?",
+            (name.strip().lower(),),
+        )
+        row = c.fetchone()
+        conn.close()
+
+        if row:
+            return f"Customer found: Past orders: {row[0]}. Usual quantities: {row[1]}. Preferred delivery slot: {row[2]}."
+        else:
+            return "Customer not found in database. Treat as a new customer."
+
+    # STEP 2, 3 & 5: SAVE TOOL (Agent calls this to remember new data)
+    @function_tool
+    async def save_customer(
+        self,
+        context: RunContext,
+        name: str,
+        past_orders: str,
+        usual_quantities: str,
+        preferred_delivery_slot: str,
+    ):
+        """Use this tool to save a new customer's record. YOU MUST ASK FOR CONSENT BEFORE USING THIS."""
+        logger.info(f"Saving customer: {name}")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO customers VALUES (?, ?, ?, ?)",
+            (
+                name.strip().lower(),
+                past_orders,
+                usual_quantities,
+                preferred_delivery_slot,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return f"Successfully saved record for {name}."
+
 
 server = AgentServer()
+
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
 
+
 server.setup_fnc = prewarm
+
 
 @server.rtc_session(agent_name="my-agent")
 async def my_agent(ctx: JobContext):
-    # Logging setup
-    ctx.log_context_fields = {
-        "room": ctx.room.name,
-    }
+    ctx.log_context_fields = {"room": ctx.room.name}
 
-    # EXACT MURF ANNOUNCEMENT SETTINGS MERGED WITH YOUR GROQ LLM
     session = AgentSession(
-        
-        # 1. DEEPGRAM (Ears): language="multi" added so it listens to BOTH Hindi and English flawlessly.
         stt=deepgram.STT(model="nova-3", language="multi"),
-        
-        # 2. LLM (Brain): Your Groq configuration exactly as you wanted (No Gemini).
         llm=openai.LLM(
             model="llama-3.3-70b-versatile",
             base_url="https://api.groq.com/openai/v1",
-            api_key=os.environ.get("GROQ_API_KEY")
+            api_key=os.environ.get("GROQ_API_KEY"),
         ),
-        
-        # 3. MURF (Voice): voice="Anisha" (Removed 'hi-IN-') to fix the foreign accent issue exactly as Murf announced.
         tts=murf.TTS(
-            voice="Anisha", 
+            voice="Anisha",
             style="Conversation",
             tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
-            text_pacing=True
+            text_pacing=True,
         ),
-        
-        # 4. TURN DETECTION: MultilingualModel() added as per Murf's requirement for mixed languages.
         turn_detection=MultilingualModel(),
-        
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
     )
 
-    # Start the session
     await session.start(
         agent=Assistant(),
         room=ctx.room,
@@ -99,9 +164,8 @@ async def my_agent(ctx: JobContext):
             ),
         ),
     )
-
-    # Join the room and connect to the user
     await ctx.connect()
+
 
 if __name__ == "__main__":
     cli.run_app(server)
