@@ -38,6 +38,11 @@ Step 4 (New Caller): If not found, ask them for their past orders, usual quantit
 Step 5 (MANDATORY CONSENT): After gathering the facts, you MUST explicitly ask: "Can I save this information for next time?".
 Step 6: ONLY if the user explicitly agrees, call the 'save_customer' tool. If they refuse, drop it and do not save.
 
+DAY 5: INVENTORY & EXTERNAL DATA:
+- When the user asks to check the stock or price of an item, you MUST call the `check_inventory` tool.
+- GRACEFUL FAILURE: If the tool returns an ERROR (like timeout), DO NOT read the error code. Instead, gracefully apologize in natural language (e.g., "I am sorry, my stock system is currently down, I cannot check that right now.").
+- TIMESTAMP MANDATE: When you successfully return stock or price data, you MUST tell the user when the data is from (e.g., "As of today's live rates, we have...").
+
 STRICT LANGUAGE & SCRIPT RULES:
 1. STRICT 1-to-1 language matching:
    - If the user speaks English, reply ONLY in pure English. No Hindi or Hinglish.
@@ -49,10 +54,12 @@ STRICT TOOL CALLING RULES:
 1. Call tools silently. Do NOT announce that you are calling a tool, using a database, or invoking a function.
 2. NEVER mention function or tool names like 'lookup_customer', 'save_customer', 'database', 'tool', or 'function' to the user.
 3. Simply execute the tool behind the scenes, and then respond naturally once you receive the tool's result.
+4. When calling `lookup_customer` or `save_customer`, you MUST pass ONLY the user's first name, in lowercase, with no punctuation (e.g., 'mehran').
+5. DO NOT say the data is saved until the `save_customer` tool returns a success message.
 
 CRITICAL RULE FOR SAVING DATA:
-If the user says 'Yes' to saving their information, you MUST IMMEDIATELY trigger the `save_customer` tool. 
-DO NOT simply say 'I have saved it' verbally without triggering the tool. 
+If the user says 'Yes' to saving their information, you MUST IMMEDIATELY trigger the `save_customer` tool.
+DO NOT simply say 'I have saved it' verbally without triggering the tool.
 You are strictly forbidden from confirming that the data is saved UNTIL you have actually executed the `save_customer` function and received a success response from it.
 """
 
@@ -64,31 +71,44 @@ class Assistant(Agent):
 
     # STEP 1: CREATE SQLITE DATABASE
     def _init_db(self):
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""CREATE TABLE IF NOT EXISTS customers
-                     (name TEXT PRIMARY KEY, past_orders TEXT, usual_quantities TEXT, preferred_delivery_slot TEXT)""")
-        conn.commit()
-        conn.close()
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("""CREATE TABLE IF NOT EXISTS customers
+                         (name TEXT PRIMARY KEY, past_orders TEXT, usual_quantities TEXT, preferred_delivery_slot TEXT)""")
+            conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Database initialization error: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     # STEP 2 & 3: LOOKUP TOOL (Agent calls this to find old callers)
     @function_tool
     async def lookup_customer(self, context: RunContext, name: str):
         """Use this tool FIRST to search for an existing customer in the database by their name."""
-        logger.info(f"Looking up customer: {name}")
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            "SELECT past_orders, usual_quantities, preferred_delivery_slot FROM customers WHERE name=?",
-            (name.strip().lower(),),
-        )
-        row = c.fetchone()
-        conn.close()
-
-        if row:
-            return f"Customer found: Past orders: {row[0]}. Usual quantities: {row[1]}. Preferred delivery slot: {row[2]}."
-        else:
-            return "Customer not found in database. Treat as a new customer."
+        clean_name = name.strip().lower()
+        logger.info(f"Looking up customer: {clean_name}")
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                "SELECT past_orders, usual_quantities, preferred_delivery_slot FROM customers WHERE name=?",
+                (clean_name,),
+            )
+            row = c.fetchone()
+            if row:
+                return f"Customer found: Past orders: {row[0]}. Usual quantities: {row[1]}. Preferred delivery slot: {row[2]}."
+            else:
+                return "Customer not found in database. Treat as a new customer."
+        except sqlite3.Error as e:
+            logger.error(f"Database lookup error for {clean_name}: {e}")
+            return f"Error looking up customer {clean_name}."
+        finally:
+            if conn:
+                conn.close()
 
     # STEP 2, 3 & 5: SAVE TOOL (Agent calls this to remember new data)
     @function_tool
@@ -101,21 +121,52 @@ class Assistant(Agent):
         preferred_delivery_slot: str,
     ):
         """Use this tool to save a new customer's record. YOU MUST ASK FOR CONSENT BEFORE USING THIS."""
-        logger.info(f"Saving customer: {name}")
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO customers VALUES (?, ?, ?, ?)",
-            (
-                name.strip().lower(),
-                past_orders,
-                usual_quantities,
-                preferred_delivery_slot,
-            ),
-        )
-        conn.commit()
-        conn.close()
-        return f"Successfully saved record for {name}."
+        clean_name = name.strip().lower()
+        logger.info(f"Saving customer: {clean_name}")
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO customers VALUES (?, ?, ?, ?)",
+                (
+                    clean_name,
+                    past_orders,
+                    usual_quantities,
+                    preferred_delivery_slot,
+                ),
+            )
+            conn.commit()
+            return f"Successfully saved record for {clean_name}."
+        except sqlite3.Error as e:
+            logger.error(f"Database save error for {clean_name}: {e}")
+            return f"Error saving customer {clean_name}."
+        finally:
+            if conn:
+                conn.close()
+
+    # DAY 5: NEW INVENTORY TOOL
+    @function_tool
+    async def check_inventory(self, context: RunContext, item_name: str):
+        """Use this tool to check the stock and price of an item."""
+        logger.info(f"Checking inventory for: {item_name}")
+
+        inventory = {
+            "potatoes": {"price": 30, "stock": 50},
+            "onions": {"price": 40, "stock": 30},
+            "tomatoes": {"price": 50, "stock": 20},
+        }
+
+        normalized_item = item_name.strip().lower()
+
+        if normalized_item == "dragonfruit":
+            return "ERROR: Database connection timeout. 503 Service Unavailable."
+
+        if normalized_item in inventory:
+            data = inventory[normalized_item]
+            return f"Found {normalized_item}. Price: {data['price']} rupees/kg, Stock: {data['stock']} kg."
+        else:
+            return "Item not found in catalog."
 
 
 server = AgentServer()

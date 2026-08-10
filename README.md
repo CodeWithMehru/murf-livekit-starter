@@ -270,6 +270,9 @@ For deeper documentation on each part, see:
 
 ---
 
+## Day 5 Update
+For the inventory lookup tool, I am using a hand-built local dataset (mock data) within the Python function to simulate the shop's catalogue and stock API, as per Day 5 guidelines.
+
 ## License
 
 MIT
