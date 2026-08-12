@@ -1,6 +1,7 @@
 import logging
 import os
 import sqlite3  # INBUILT PYTHON DATABASE
+from typing import Annotated
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -10,7 +11,6 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
-    RunContext,  # IMPORTANT FOR DAY 4 TOOLS
     cli,
     function_tool,  # IMPORTANT FOR DAY 4 TOOLS
     room_io,
@@ -42,6 +42,12 @@ DAY 5: INVENTORY & EXTERNAL DATA:
 - When the user asks to check the stock or price of an item, you MUST call the `check_inventory` tool.
 - GRACEFUL FAILURE: If the tool returns an ERROR (like timeout), DO NOT read the error code. Instead, gracefully apologize in natural language (e.g., "I am sorry, my stock system is currently down, I cannot check that right now.").
 - TIMESTAMP MANDATE: When you successfully return stock or price data, you MUST tell the user when the data is from (e.g., "As of today's live rates, we have...").
+
+DAY 7: HUMAN ESCALATION:
+- TRIGGERS: If the user asks for a refund, complains about rotten/bad quality items, or has a payment dispute, you MUST stop trying to solve it yourself.
+- MANDATORY CONSENT: Before calling `create_escalation`, you MUST explicitly ask: "Can I forward this issue to our human support team?"
+- If they say yes, call the tool.
+- NEXT STEPS: Once the tool returns the Ticket ID, you MUST tell the user their reference ID and assure them: "A human agent will contact you within 24 hours."
 
 STRICT LANGUAGE & SCRIPT RULES:
 1. STRICT 1-to-1 language matching:
@@ -77,6 +83,8 @@ class Assistant(Agent):
             c = conn.cursor()
             c.execute("""CREATE TABLE IF NOT EXISTS customers
                          (name TEXT PRIMARY KEY, past_orders TEXT, usual_quantities TEXT, preferred_delivery_slot TEXT)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS tickets
+                         (ticket_id TEXT PRIMARY KEY, customer_name TEXT, issue_summary TEXT, urgency TEXT)""")
             conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Database initialization error: {e}")
@@ -86,7 +94,9 @@ class Assistant(Agent):
 
     # STEP 2 & 3: LOOKUP TOOL (Agent calls this to find old callers)
     @function_tool
-    async def lookup_customer(self, context: RunContext, name: str):
+    async def lookup_customer(
+        self, name: Annotated[str, "The customer's first name, in lowercase"]
+    ):
         """Use this tool FIRST to search for an existing customer in the database by their name."""
         clean_name = name.strip().lower()
         logger.info(f"Looking up customer: {clean_name}")
@@ -114,11 +124,12 @@ class Assistant(Agent):
     @function_tool
     async def save_customer(
         self,
-        context: RunContext,
-        name: str,
-        past_orders: str,
-        usual_quantities: str,
-        preferred_delivery_slot: str,
+        name: Annotated[str, "The customer's first name, in lowercase"],
+        past_orders: Annotated[str, "The items the customer usually orders"],
+        usual_quantities: Annotated[str, "The quantities the customer usually orders"],
+        preferred_delivery_slot: Annotated[
+            str, "The customer's preferred delivery time"
+        ],
     ):
         """Use this tool to save a new customer's record. YOU MUST ASK FOR CONSENT BEFORE USING THIS."""
         clean_name = name.strip().lower()
@@ -147,7 +158,9 @@ class Assistant(Agent):
 
     # DAY 5: NEW INVENTORY TOOL
     @function_tool
-    async def check_inventory(self, context: RunContext, item_name: str):
+    async def check_inventory(
+        self, item_name: Annotated[str, "The name of the item to check stock for"]
+    ):
         """Use this tool to check the stock and price of an item."""
         logger.info(f"Checking inventory for: {item_name}")
 
@@ -167,6 +180,47 @@ class Assistant(Agent):
             return f"Found {normalized_item}. Price: {data['price']} rupees/kg, Stock: {data['stock']} kg."
         else:
             return "Item not found in catalog."
+
+    # DAY 7: NEW HUMAN ESCALATION TOOL
+    @function_tool
+    async def create_escalation(
+        self,
+        customer_name: Annotated[str, "The customer's first name"],
+        issue_summary: Annotated[
+            str,
+            "A brief summary of the issue (e.g., refund, payment dispute, quality complaint)",
+        ],
+        urgency: Annotated[str, "The urgency of the issue (e.g., high, low)"],
+    ):
+        """Use this tool to escalate a complex issue (refund, payment dispute, quality complaint) to a human agent."""
+        import random
+
+        ticket_id = f"BK-{random.randint(1000, 9999)}"
+        clean_name = customer_name.strip().lower()
+
+        logger.info("\n======================================")
+        logger.info(f"🚨 NEW TICKET ESCALATION: {ticket_id}")
+        logger.info(f"Customer: {clean_name}")
+        logger.info(f"Issue: {issue_summary}")
+        logger.info(f"Urgency: {urgency}")
+        logger.info("======================================\n")
+
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO tickets (ticket_id, customer_name, issue_summary, urgency) VALUES (?, ?, ?, ?)",
+                (ticket_id, clean_name, issue_summary, urgency),
+            )
+            conn.commit()
+            return f"Successfully created ticket {ticket_id}."
+        except sqlite3.Error as e:
+            logger.error(f"Database error while creating ticket {ticket_id}: {e}")
+            return "Error creating ticket."
+        finally:
+            if conn:
+                conn.close()
 
 
 server = AgentServer()
