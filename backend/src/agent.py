@@ -11,6 +11,7 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
+    RunContext,
     cli,
     function_tool,  # IMPORTANT FOR DAY 4 TOOLS
     room_io,
@@ -25,55 +26,126 @@ load_dotenv(".env.local")
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bol_khata.db")
 
-# DAY 4 STRICT SYSTEM PROMPT (Memory, Consent & Devanagari Rules)
+# MAIN AGENT (ANISHA) SYSTEM PROMPT
 SYSTEM_PROMPT = """
 IDENTITY: You are Anisha, a voice assistant for 'Bol-Khata' (Local Commerce track).
-OBJECTIVES: Help vendors manage their orders and customers. You must follow the exact sequence below.
 
-SEQUENCE (STRICT):
-Step 1: When a user says Hi or greets you, ask for their name.
-Step 2: Use the 'lookup_customer' tool to check their past record.
-Step 3 (Returning Caller): If data is found, greet them by name and mention their past facts (e.g. past orders, usual quantities, preferred delivery slot).
-Step 4 (New Caller): If not found, ask them for their past orders, usual quantities, and preferred delivery slot.
-Step 5 (MANDATORY CONSENT): After gathering the facts, you MUST explicitly ask: "Can I save this information for next time?".
-Step 6: ONLY if the user explicitly agrees, call the 'save_customer' tool. If they refuse, drop it and do not save.
+STRICT RULES & TOOL USAGE:
+1. MEMORY (DAY 4): When a user greets you (e.g., "Hi, I am Mehran"), you MUST immediately silently call the `lookup_customer` tool.
+- If found: Greet them with their past order details.
+- If not found: Ask what they usually order, then ask "Can I save this?". If they say yes, you MUST call `save_customer`.
+2. INVENTORY (DAY 5): If the user asks for the price, stock, or availability of an item (like onions or tomatoes), you MUST silently call the `check_inventory` tool. NEVER say you don't have access to inventory. Tell them the price based on the tool's result.
+3. CALL ANALYTICS (DAY 8): If you successfully answer an inventory question, silently call `mark_call_successful`.
+4. HANDOFF (DAY 9): If the user asks for a refund, return, or complains about bad/rotten quality (e.g., rotten potatoes), you MUST explicitly say "I will connect you to our returns specialist" and then immediately call the `transfer_to_returns_specialist` tool.
 
-DAY 5: INVENTORY & EXTERNAL DATA:
-- When the user asks to check the stock or price of an item, you MUST call the `check_inventory` tool.
-- GRACEFUL FAILURE: If the tool returns an ERROR (like timeout), DO NOT read the error code. Instead, gracefully apologize in natural language (e.g., "I am sorry, my stock system is currently down, I cannot check that right now.").
-- TIMESTAMP MANDATE: When you successfully return stock or price data, you MUST tell the user when the data is from (e.g., "As of today's live rates, we have...").
-
-DAY 7: HUMAN ESCALATION:
-- TRIGGERS: If the user asks for a refund, complains about rotten/bad quality items, or has a payment dispute, you MUST stop trying to solve it yourself.
-- MANDATORY CONSENT: Before calling `create_escalation`, you MUST explicitly ask: "Can I forward this issue to our human support team?"
-- If they say yes, call the tool.
-- NEXT STEPS: Once the tool returns the Ticket ID, you MUST tell the user their reference ID and assure them: "A human agent will contact you within 24 hours."
-
-STRICT LANGUAGE & SCRIPT RULES:
-1. STRICT 1-to-1 language matching:
-   - If the user speaks English, reply ONLY in pure English. No Hindi or Hinglish.
-   - If the user speaks Hindi, reply ONLY in pure Hindi using Devanagari script (e.g., नमस्ते). No English, Hinglish, or romanized Hindi.
-   - Do NOT mix languages in a single response. Do NOT translate your response or add translations.
-2. Keep responses short and conversational.
-
-STRICT TOOL CALLING RULES:
-1. Call tools silently. Do NOT announce that you are calling a tool, using a database, or invoking a function.
-2. NEVER mention function or tool names like 'lookup_customer', 'save_customer', 'database', 'tool', or 'function' to the user.
-3. Simply execute the tool behind the scenes, and then respond naturally once you receive the tool's result.
-4. When calling `lookup_customer` or `save_customer`, you MUST pass ONLY the user's first name, in lowercase, with no punctuation (e.g., 'mehran').
-5. DO NOT say the data is saved until the `save_customer` tool returns a success message.
-
-CRITICAL RULE FOR SAVING DATA:
-If the user says 'Yes' to saving their information, you MUST IMMEDIATELY trigger the `save_customer` tool.
-DO NOT simply say 'I have saved it' verbally without triggering the tool.
-You are strictly forbidden from confirming that the data is saved UNTIL you have actually executed the `save_customer` function and received a success response from it.
+LANGUAGE & SCRIPT:
+- If the user speaks English, reply ONLY in pure English.
+- If the user speaks Hindi, reply ONLY in pure Hindi using Devanagari script (e.g., नमस्ते), never romanized.
+- Do NOT mention tool names to the user.
 """
+
+# SPECIALIST AGENT (SAMAR) SYSTEM PROMPT
+RETURNS_SPECIALIST_PROMPT = """
+IDENTITY: You are Samar, the Returns & Refunds Specialist for Bol-Khata.
+ROLE: You take over calls when a customer is angry about product quality or wants a refund.
+RULE: Introduce yourself immediately: "Hello, I am Samar, the Returns Specialist. I understand you had an issue with your order." Apologize for the issue, process a virtual refund, and then ask if they need anything else. Keep it short.
+"""
+
+
+class ReturnsSpecialist(Agent):
+    def __init__(self) -> None:
+        super().__init__(
+            instructions=RETURNS_SPECIALIST_PROMPT,
+            tts=murf.TTS(
+                voice="Samar",
+                style="Conversation",
+                tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
+                text_pacing=True,
+            ),
+        )
+        self.call_successful = False
+
+    @function_tool
+    async def create_escalation(
+        self,
+        customer_name: Annotated[str, "The customer's first name"],
+        issue_summary: Annotated[
+            str,
+            "A brief summary of the issue (e.g., refund, payment dispute, quality complaint)",
+        ],
+        urgency: Annotated[str, "The urgency of the issue (e.g., high, low)"],
+    ):
+        """Use this tool to escalate a complex issue (refund, payment dispute, quality complaint) to a human agent."""
+        import random
+
+        ticket_id = f"BK-{random.randint(1000, 9999)}"
+        clean_name = customer_name.strip().lower()
+
+        logger.info("\n======================================")
+        logger.info(f"🚨 NEW TICKET ESCALATION (Specialist): {ticket_id}")
+        logger.info(f"Customer: {clean_name}")
+        logger.info(f"Issue: {issue_summary}")
+        logger.info(f"Urgency: {urgency}")
+        logger.info("======================================\n")
+
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO tickets (ticket_id, customer_name, issue_summary, urgency) VALUES (?, ?, ?, ?)",
+                (ticket_id, clean_name, issue_summary, urgency),
+            )
+            conn.commit()
+            return f"Successfully created ticket {ticket_id}."
+        except sqlite3.Error as e:
+            logger.error(f"Database error while creating ticket {ticket_id}: {e}")
+            return "Error creating ticket."
+        finally:
+            if conn:
+                conn.close()
+
+    @function_tool
+    async def mark_call_successful(
+        self, reason: Annotated[str, "Short reason for why the call was successful"]
+    ):
+        """Use this tool when you have successfully helped the user."""
+        logger.info(
+            f"Call marked as successful by Returns Specialist. Reason: {reason}"
+        )
+        self.call_successful = True
+        return "Call outcome marked as successful."
+
+    @function_tool
+    async def check_inventory(
+        self, item_name: Annotated[str, "The name of the item to check stock for"]
+    ):
+        """Use this tool to check the stock and price of an item."""
+        logger.info(f"Checking inventory for: {item_name}")
+
+        inventory = {
+            "potatoes": {"price": 30, "stock": 50},
+            "onions": {"price": 40, "stock": 30},
+            "tomatoes": {"price": 50, "stock": 20},
+        }
+
+        normalized_item = item_name.strip().lower()
+
+        if normalized_item == "dragonfruit":
+            return "ERROR: Database connection timeout. 503 Service Unavailable."
+
+        if normalized_item in inventory:
+            data = inventory[normalized_item]
+            return f"Found {normalized_item}. Price: {data['price']} rupees/kg, Stock: {data['stock']} kg."
+        else:
+            return "Item not found in catalog."
 
 
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=SYSTEM_PROMPT)
         self._init_db()
+        self.call_successful = False
 
     # STEP 1: CREATE SQLITE DATABASE
     def _init_db(self):
@@ -85,6 +157,8 @@ class Assistant(Agent):
                          (name TEXT PRIMARY KEY, past_orders TEXT, usual_quantities TEXT, preferred_delivery_slot TEXT)""")
             c.execute("""CREATE TABLE IF NOT EXISTS tickets
                          (ticket_id TEXT PRIMARY KEY, customer_name TEXT, issue_summary TEXT, urgency TEXT)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS call_logs
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT, outcome TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
             conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Database initialization error: {e}")
@@ -222,6 +296,33 @@ class Assistant(Agent):
             if conn:
                 conn.close()
 
+    @function_tool
+    async def mark_call_successful(
+        self, reason: Annotated[str, "Short reason for why the call was successful"]
+    ):
+        """Use this tool when you have successfully helped the user (e.g., successfully checked inventory or escalated a ticket)."""
+        logger.info(f"Call marked as successful by agent. Reason: {reason}")
+        self.call_successful = True
+        return "Call outcome marked as successful."
+
+    # DAY 9: AGENT HANDOFF TOOL
+    @function_tool
+    async def transfer_to_returns_specialist(
+        self,
+        context: RunContext,
+        reason: Annotated[
+            str, "Reason for handoff (e.g., refund request, rotten item complaint)"
+        ],
+    ):
+        """Use this tool ONLY when the user asks for a refund, complains about product quality or rotten items, or wants to process a return."""
+        logger.info(
+            f"🔀 HANDOFF: Transferring to Returns Specialist (Samar). Reason: {reason}"
+        )
+        specialist = ReturnsSpecialist()
+        context.session.update_agent(specialist)
+        context.proc.userdata["returns_specialist"] = specialist
+        return "I will connect you to our returns specialist."
+
 
 server = AgentServer()
 
@@ -255,8 +356,10 @@ async def my_agent(ctx: JobContext):
         preemptive_generation=True,
     )
 
+    agent_instance = Assistant()
+
     await session.start(
-        agent=Assistant(),
+        agent=agent_instance,
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
@@ -270,6 +373,35 @@ async def my_agent(ctx: JobContext):
         ),
     )
     await ctx.connect()
+
+    @ctx.room.on("disconnected")
+    def on_disconnected(*args):
+        is_successful = agent_instance.call_successful
+        if "returns_specialist" in ctx.proc.userdata:
+            specialist = ctx.proc.userdata["returns_specialist"]
+            is_successful = is_successful or getattr(
+                specialist, "call_successful", False
+            )
+
+        if hasattr(session, "current_agent") and session.current_agent:
+            is_successful = is_successful or getattr(
+                session.current_agent, "call_successful", False
+            )
+
+        outcome = "Successful" if is_successful else "Failed"
+        logger.info(f"Room disconnected. Logging call outcome: {outcome}")
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("INSERT INTO call_logs (outcome) VALUES (?)", (outcome,))
+            conn.commit()
+            logger.info(f"Successfully logged {outcome} call to database.")
+        except sqlite3.Error as e:
+            logger.error(f"Error saving call log: {e}")
+        finally:
+            if conn:
+                conn.close()
 
 
 if __name__ == "__main__":
