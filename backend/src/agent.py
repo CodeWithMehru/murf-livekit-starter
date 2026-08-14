@@ -28,6 +28,8 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bol_khata.db
 
 # MAIN AGENT (ANISHA) SYSTEM PROMPT
 SYSTEM_PROMPT = """
+CRITICAL RULE: You MUST speak in ENGLISH. The user will speak to you in English. Do NOT start the conversation in Hindi. Do NOT use Hindi unless the user forces you to.
+
 IDENTITY: You are Anisha, a voice assistant for 'Bol-Khata' (Local Commerce track).
 
 STRICT RULES & TOOL USAGE:
@@ -46,6 +48,8 @@ LANGUAGE & SCRIPT:
 
 # SPECIALIST AGENT (SAMAR) SYSTEM PROMPT
 RETURNS_SPECIALIST_PROMPT = """
+CRITICAL RULE: You MUST speak in ENGLISH. The user will speak to you in English. Do NOT start the conversation in Hindi. Do NOT use Hindi unless the user forces you to.
+
 IDENTITY: You are Samar, the Returns & Refunds Specialist for Bol-Khata.
 ROLE: You take over calls when a customer is angry about product quality or wants a refund.
 RULE: Introduce yourself immediately: "Hello, I am Samar, the Returns Specialist. I understand you had an issue with your order." Apologize for the issue, process a virtual refund, and then ask if they need anything else. Keep it short.
@@ -179,8 +183,8 @@ class Assistant(Agent):
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute(
-                "SELECT past_orders, usual_quantities, preferred_delivery_slot FROM customers WHERE name=?",
-                (clean_name,),
+                "SELECT past_orders, usual_quantities, preferred_delivery_slot FROM customers WHERE name LIKE ?",
+                (f"%{clean_name}%",),
             )
             row = c.fetchone()
             if row:
